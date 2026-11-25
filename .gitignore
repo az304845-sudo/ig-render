@@ -1,0 +1,14 @@
+# 個人のパスや実行記録が入る物は載せない
+log*.txt
+*.log
+*.mp4
+*.mov
+*.blend
+*.blend1
+frames/
+out/
+.DS_Store
+*.md
+!README.md
+.env
+*.token

@@ -1,0 +1,107 @@
+name: render
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "jobs/ の下のフォルダ名"
+        required: true
+      kind:
+        description: "threejs か blender"
+        required: true
+        default: threejs
+      frames:
+        description: "全コマ数（three.js は 0 から frames-1、blender は 1 から frames）"
+        required: true
+        default: "150"
+      chunks:
+        description: "同時に分ける数（最大20）"
+        required: true
+        default: "10"
+      fps:
+        description: "動画にする fps"
+        required: true
+        default: "30"
+      width:
+        required: true
+        default: "1080"
+      height:
+        required: true
+        default: "1920"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.p.outputs.matrix }}
+    steps:
+      - id: p
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, math
+          n=int("${{ inputs.frames }}"); c=max(1,min(20,int("${{ inputs.chunks }}")))
+          base = 0 if "${{ inputs.kind }}"=="threejs" else 1
+          size = math.ceil(n/c); out=[]
+          for i in range(c):
+              s=base+i*size; e=min(base+n-1, s+size-1)
+              if s<=e: out.append({"i":i,"start":s,"end":e})
+          print("matrix="+json.dumps(out))
+          EOF
+
+  render:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        part: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: inputs.kind == 'threejs'
+        with:
+          python-version: '3.12'
+      - name: three.js の準備
+        if: inputs.kind == 'threejs'
+        run: |
+          pip install playwright==1.48.0
+          python -m playwright install --with-deps chromium
+      - name: Blender の取得
+        if: inputs.kind == 'blender'
+        run: |
+          curl -sSL -o b.tar.xz https://download.blender.org/release/Blender4.2/blender-4.2.3-linux-x64.tar.xz
+          mkdir -p blender && tar -xf b.tar.xz -C blender --strip-components=1
+          sudo apt-get update -qq && sudo apt-get install -y -qq libxi6 libxkbcommon0 libxxf86vm1 libxfixes3 libxrender1 libgl1 libsm6 >/dev/null
+      - name: 描く（three.js）
+        if: inputs.kind == 'threejs'
+        run: python tools/render_threejs.py "jobs/${{ inputs.job }}" ${{ matrix.part.start }} ${{ matrix.part.end }} frames ${{ inputs.width }} ${{ inputs.height }} ${{ inputs.fps }}
+      - name: 描く（blender）
+        if: inputs.kind == 'blender'
+        run: |
+          mkdir -p frames
+          ./blender/blender -b -noaudio -P "jobs/${{ inputs.job }}/scene.py" -o "$GITHUB_WORKSPACE/frames/#####" -F PNG -s ${{ matrix.part.start }} -e ${{ matrix.part.end }} -a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frames-${{ matrix.part.i }}
+          path: frames/*.png
+          retention-days: 2
+
+  encode:
+    needs: render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: frames-*
+          path: frames
+          merge-multiple: true
+      - run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
+          ls frames | wc -l
+          ffmpeg -y -framerate ${{ inputs.fps }} -pattern_type glob -i 'frames/*.png' -c:v libx264 -pix_fmt yuv420p -crf 16 -preset slow out.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video
+          path: out.mp4
+          retention-days: 7
